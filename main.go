@@ -37,14 +37,14 @@ func main() {
 	serveMux.Handle("/app/", apicfg.middlewareMetricsInc(
 		http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 
-	serveMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	serveMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
 	})
 
-	serveMux.HandleFunc("/metrics", apicfg.handleMetrics)
-	serveMux.HandleFunc("/reset", apicfg.resetMetrics)
+	serveMux.HandleFunc("GET /metrics", apicfg.handleMetrics)
+	serveMux.HandleFunc("POST /reset", apicfg.resetMetrics)
 
 	var server = &http.Server{
 		Addr:    ":8080",
