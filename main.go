@@ -8,6 +8,8 @@ import (
 func main() {
 	serveMux := http.NewServeMux()
 	serveMux.Handle("/", http.FileServer(http.Dir(".")))
+	serveMux.Handle("/logo.png", http.FileServer(http.Dir("/assets/")))
+
 	var server = &http.Server{
 		Addr:    ":8080",
 		Handler: serveMux,
