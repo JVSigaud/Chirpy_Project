@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync/atomic"
@@ -20,14 +21,62 @@ func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 
 func (cfg *apiConfig) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(200)
-	w.Write([]byte("Hits: " + fmt.Sprintf("%d", cfg.fileserverHits.Load())))
+	w.Write([]byte(fmt.Sprintf(
+		`<html>
+  <body>
+    <h1>Welcome, Chirpy Admin</h1>
+    <p>Chirpy has been visited %d times!</p>
+  </body>
+</html>`, cfg.fileserverHits.Load())))
 }
 func (cfg *apiConfig) resetMetrics(w http.ResponseWriter, r *http.Request) {
 	cfg.fileserverHits.Store(0)
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(200)
+
+}
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	type params struct {
+		Body string `json:"body"`
+	}
+	type responseParams struct {
+		Err   string `json:"error"`
+		Valid bool   `json:"valid"`
+	}
+
+	decoder := json.NewDecoder(r.Body)
+	var p params
+	var respBody responseParams
+
+	err := decoder.Decode(&p)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if err != nil {
+		respBody.Err = "Something went wrong"
+		respBody.Valid = false
+		w.WriteHeader(500)
+	}
+	if len(p.Body) > 140 {
+		respBody.Err = "Chirp is too long"
+		respBody.Valid = false
+		w.WriteHeader(400)
+
+	} else {
+		respBody.Err = "nil"
+		respBody.Valid = true
+		w.WriteHeader(200)
+	}
+	data, err := json.Marshal(respBody)
+
+	if err != nil {
+		respBody.Err = "Something went wrong"
+		respBody.Valid = false
+		w.WriteHeader(500)
+	}
+
+	w.Write(data)
 
 }
 
@@ -37,14 +86,16 @@ func main() {
 	serveMux.Handle("/app/", apicfg.middlewareMetricsInc(
 		http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
 
-	serveMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+	serveMux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(200)
 		w.Write([]byte("OK"))
 	})
 
-	serveMux.HandleFunc("GET /metrics", apicfg.handleMetrics)
-	serveMux.HandleFunc("POST /reset", apicfg.resetMetrics)
+	serveMux.HandleFunc("GET /admin/metrics", apicfg.handleMetrics)
+	serveMux.HandleFunc("POST /admin/reset", apicfg.resetMetrics)
+
+	serveMux.HandleFunc("POST /api/validate_chirp", handler)
 
 	var server = &http.Server{
 		Addr:    ":8080",
