@@ -1,14 +1,43 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"strings"
 	"sync/atomic"
+
+	"Chirpy_Project/internal/database"
+
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
+
+func clean_body(body string) string {
+	bads := map[string]struct{}{
+		"kerfuffle": {},
+		"sharbert":  {},
+		"fornax":    {},
+	}
+
+	words := strings.Split(body, " ")
+	cleaned := make([]string, 0, len(words))
+
+	for _, w := range words {
+		if _, ok := bads[strings.ToLower(w)]; ok {
+			cleaned = append(cleaned, "****")
+		} else {
+			cleaned = append(cleaned, w)
+		}
+	}
+	return strings.Join(cleaned, " ")
+}
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
+	objQuery       *database.Queries
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -43,8 +72,9 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		Body string `json:"body"`
 	}
 	type responseParams struct {
-		Err   string `json:"error"`
-		Valid bool   `json:"valid"`
+		Err         string `json:"error"`
+		Valid       bool   `json:"valid"`
+		CleanedBody string `json:"cleaned_body"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
@@ -61,11 +91,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if len(p.Body) > 140 {
 		respBody.Err = "Chirp is too long"
 		respBody.Valid = false
+
 		w.WriteHeader(400)
 
 	} else {
-		respBody.Err = "nil"
+		respBody.Err = ""
 		respBody.Valid = true
+		respBody.CleanedBody = clean_body(p.Body)
 		w.WriteHeader(200)
 	}
 	data, err := json.Marshal(respBody)
@@ -81,7 +113,13 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	apicfg := &apiConfig{}
+	godotenv.Load(".env")
+	dbURL := os.Getenv("DB_URL")
+	db, _ := sql.Open("postgres", dbURL)
+	dbQueries := database.New(db)
+
+	apicfg := &apiConfig{objQuery: dbQueries}
+
 	serveMux := http.NewServeMux()
 	serveMux.Handle("/app/", apicfg.middlewareMetricsInc(
 		http.StripPrefix("/app", http.FileServer(http.Dir(".")))))
