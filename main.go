@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
 	"sync/atomic"
 
 	"Chirpy_Project/internal/database"
@@ -25,25 +24,33 @@ type User struct {
 	Email     string    `json:"email"`
 }
 
-func clean_body(body string) string {
-	bads := map[string]struct{}{
-		"kerfuffle": {},
-		"sharbert":  {},
-		"fornax":    {},
-	}
-
-	words := strings.Split(body, " ")
-	cleaned := make([]string, 0, len(words))
-
-	for _, w := range words {
-		if _, ok := bads[strings.ToLower(w)]; ok {
-			cleaned = append(cleaned, "****")
-		} else {
-			cleaned = append(cleaned, w)
-		}
-	}
-	return strings.Join(cleaned, " ")
+type Chirpy struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
 }
+
+// func clean_body(body string) string {
+// 	bads := map[string]struct{}{
+// 		"kerfuffle": {},
+// 		"sharbert":  {},
+// 		"fornax":    {},
+// 	}
+
+// 	words := strings.Split(body, " ")
+// 	cleaned := make([]string, 0, len(words))
+
+// 	for _, w := range words {
+// 		if _, ok := bads[strings.ToLower(w)]; ok {
+// 			cleaned = append(cleaned, "****")
+// 		} else {
+// 			cleaned = append(cleaned, w)
+// 		}
+// 	}
+// 	return strings.Join(cleaned, " ")
+// }
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
@@ -114,46 +121,71 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 }
 
-func handler(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
 
 	type params struct {
-		Body string `json:"body"`
+		Body   string    `json:"body"`
+		UserID uuid.UUID `json:"user_id"`
 	}
-	type responseParams struct {
-		Err         string `json:"error"`
-		Valid       bool   `json:"valid"`
-		CleanedBody string `json:"cleaned_body"`
-	}
+	// type responseParams struct {
+	// 	Err         string `json:"error"`
+	// 	Valid       bool   `json:"valid"`
+	// 	CleanedBody string `json:"cleaned_body"`
+	// }
 
 	decoder := json.NewDecoder(r.Body)
 	var p params
-	var respBody responseParams
+	// var respBody responseParams
 
 	err := decoder.Decode(&p)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if err != nil {
-		respBody.Err = "Something went wrong"
-		respBody.Valid = false
+		// respBody.Err = "Something went wrong"
+		// respBody.Valid = false
 		w.WriteHeader(500)
+		return
 	}
 	if len(p.Body) > 140 {
-		respBody.Err = "Chirp is too long"
-		respBody.Valid = false
+		// respBody.Err = "Chirp is too long"
+		// respBody.Valid = false
 
 		w.WriteHeader(400)
+		return
 
 	} else {
-		respBody.Err = ""
-		respBody.Valid = true
-		respBody.CleanedBody = clean_body(p.Body)
-		w.WriteHeader(200)
+		// respBody.Err = ""
+		// respBody.Valid = true
+		// respBody.CleanedBody = clean_body(p.Body)
+		w.WriteHeader(201)
 	}
-	data, err := json.Marshal(respBody)
+
+	chirpParams := database.CreateChirpParams{
+		Body:   p.Body,
+		UserID: p.UserID,
+	}
+
+	user, err := cfg.objQuery.CreateChirp(r.Context(), chirpParams)
+	// fmt.Printf("User object from CreateChirp: %+v\n", user)
 
 	if err != nil {
-		respBody.Err = "Something went wrong"
-		respBody.Valid = false
 		w.WriteHeader(500)
+		return
+	}
+	nwUser := Chirpy{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Body:      user.Body,
+		UserID:    user.UserID,
+	}
+
+	data, err := json.Marshal(nwUser)
+
+	if err != nil {
+		// respBody.Err = "Something went wrong"
+		// respBody.Valid = false
+		w.WriteHeader(500)
+		return
 	}
 
 	w.Write(data)
@@ -183,7 +215,7 @@ func main() {
 	serveMux.HandleFunc("POST /admin/reset", apicfg.resetMetrics)
 	serveMux.HandleFunc("POST /api/users", apicfg.CreateUser)
 
-	serveMux.HandleFunc("POST /api/validate_chirp", handler)
+	serveMux.HandleFunc("POST /api/chirps", apicfg.handlerChirps)
 
 	var server = &http.Server{
 		Addr:    ":8080",
