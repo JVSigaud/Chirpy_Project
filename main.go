@@ -8,6 +8,7 @@ import (
 	"os"
 	"sync/atomic"
 
+	"Chirpy_Project/internal/auth"
 	"Chirpy_Project/internal/database"
 
 	"time"
@@ -18,10 +19,11 @@ import (
 )
 
 type User struct {
-	ID        uuid.UUID `json:"id"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-	Email     string    `json:"email"`
+	ID             uuid.UUID `json:"id"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+	Email          string    `json:"email"`
+	HashedPassword string    `json:"hashed_password"`
 }
 
 type Chirpy struct {
@@ -107,7 +109,8 @@ func (cfg *apiConfig) resetMetrics(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	type params struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 	var p params
 	decoder := json.NewDecoder(r.Body)
@@ -117,8 +120,10 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
-
-	user, err := cfg.objQuery.CreateUser(r.Context(), p.Email)
+	hashed, _ := auth.HashedPassword(p.Password)
+	user, err := cfg.objQuery.CreateUser(
+		r.Context(), database.CreateUserParams{
+			Email: p.Email, HashedPassword: hashed})
 	if err != nil {
 		w.WriteHeader(500)
 		return
@@ -133,6 +138,46 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(201)
 	w.Write(data)
+
+}
+
+func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	type params struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	var p params
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&p); err != nil {
+		w.WriteHeader(500)
+		return
+	}
+
+	user, err := cfg.objQuery.GetUser(r.Context(), p.Email)
+	if err != nil {
+		w.WriteHeader(401)
+		return
+	}
+
+	is_valid, err := auth.CheckPasswordHash(p.Password, user.HashedPassword)
+	if is_valid && err == nil {
+		dat, err := json.Marshal(User{
+			ID:        user.ID,
+			CreatedAt: user.CreatedAt,
+			UpdatedAt: user.UpdatedAt,
+			Email:     user.Email,
+		})
+		if err != nil {
+			w.WriteHeader(500)
+			return
+		}
+		w.WriteHeader(200)
+		w.Write(dat)
+	} else {
+		w.WriteHeader(401)
+		return
+	}
 
 }
 
@@ -273,6 +318,7 @@ func main() {
 	serveMux.HandleFunc("GET /admin/metrics", apicfg.handleMetrics)
 	serveMux.HandleFunc("POST /admin/reset", apicfg.resetMetrics)
 	serveMux.HandleFunc("POST /api/users", apicfg.CreateUser)
+	serveMux.HandleFunc("POST /api/login", apicfg.handlerUserLogin)
 
 	serveMux.HandleFunc("POST /api/chirps", apicfg.handlerChirps)
 	serveMux.HandleFunc("GET /api/chirps", apicfg.handlerGetChirps)
