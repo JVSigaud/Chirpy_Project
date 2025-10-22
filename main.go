@@ -32,6 +32,21 @@ type Chirpy struct {
 	UserID    uuid.UUID `json:"user_id"`
 }
 
+func mapChirpy(chirpSlice []database.Chirp) []Chirpy {
+	chirpySlice := make([]Chirpy, len(chirpSlice))
+	for idx, chirp := range chirpSlice {
+		chirpySlice[idx] = Chirpy{
+			ID:        chirp.ID,
+			CreatedAt: chirp.CreatedAt,
+			UpdatedAt: chirp.UpdatedAt,
+			Body:      chirp.Body,
+			UserID:    chirp.UserID,
+		}
+
+	}
+	return chirpySlice
+}
+
 // func clean_body(body string) string {
 // 	bads := map[string]struct{}{
 // 		"kerfuffle": {},
@@ -158,6 +173,7 @@ func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
 		// respBody.CleanedBody = clean_body(p.Body)
 		w.WriteHeader(201)
 	}
+	// parsedUserID, err := uuid.Parse(reqBody.UserID)
 
 	chirpParams := database.CreateChirpParams{
 		Body:   p.Body,
@@ -192,6 +208,49 @@ func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
 
 }
 
+func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	user, err := cfg.objQuery.GetChirps(r.Context())
+	if err != nil {
+		w.WriteHeader(500)
+		return
+	}
+	dataChirp := mapChirpy(user)
+	data, err := json.Marshal(dataChirp)
+	if err != nil {
+		w.WriteHeader(500)
+		return
+	}
+	w.WriteHeader(200)
+	w.Write(data)
+
+}
+func (cfg *apiConfig) handlerGetChirp(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(r.PathValue("ID"))
+	if err != nil {
+		w.WriteHeader(500)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	chirp, err := cfg.objQuery.GetChirp(r.Context(), id)
+	if err != nil {
+		w.WriteHeader(404)
+		return
+	}
+	dat, err := json.Marshal(Chirpy{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+	})
+	if err != nil {
+		w.WriteHeader(500)
+		return
+	}
+	w.WriteHeader(200)
+	w.Write(dat)
+}
 func main() {
 	godotenv.Load(".env")
 	dbURL := os.Getenv("DB_URL")
@@ -216,7 +275,8 @@ func main() {
 	serveMux.HandleFunc("POST /api/users", apicfg.CreateUser)
 
 	serveMux.HandleFunc("POST /api/chirps", apicfg.handlerChirps)
-
+	serveMux.HandleFunc("GET /api/chirps", apicfg.handlerGetChirps)
+	serveMux.HandleFunc("GET /api/chirps/{ID}", apicfg.handlerGetChirp)
 	var server = &http.Server{
 		Addr:    ":8080",
 		Handler: serveMux,
