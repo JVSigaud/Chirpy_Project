@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync/atomic"
 
 	"Chirpy_Project/internal/auth"
@@ -24,6 +25,7 @@ type User struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 	Email          string    `json:"email"`
 	HashedPassword string    `json:"hashed_password"`
+	Token          string    `json:"token"`
 }
 
 type Chirpy struct {
@@ -49,30 +51,31 @@ func mapChirpy(chirpSlice []database.Chirp) []Chirpy {
 	return chirpySlice
 }
 
-// func clean_body(body string) string {
-// 	bads := map[string]struct{}{
-// 		"kerfuffle": {},
-// 		"sharbert":  {},
-// 		"fornax":    {},
-// 	}
+func clean_body(body string) string {
+	bads := map[string]struct{}{
+		"kerfuffle": {},
+		"sharbert":  {},
+		"fornax":    {},
+	}
 
-// 	words := strings.Split(body, " ")
-// 	cleaned := make([]string, 0, len(words))
+	words := strings.Split(body, " ")
+	cleaned := make([]string, 0, len(words))
 
-// 	for _, w := range words {
-// 		if _, ok := bads[strings.ToLower(w)]; ok {
-// 			cleaned = append(cleaned, "****")
-// 		} else {
-// 			cleaned = append(cleaned, w)
-// 		}
-// 	}
-// 	return strings.Join(cleaned, " ")
-// }
+	for _, w := range words {
+		if _, ok := bads[strings.ToLower(w)]; ok {
+			cleaned = append(cleaned, "****")
+		} else {
+			cleaned = append(cleaned, w)
+		}
+	}
+	return strings.Join(cleaned, " ")
+}
 
 type apiConfig struct {
 	fileserverHits atomic.Int32
 	objQuery       *database.Queries
 	Platform       string
+	keyJWT         string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -120,7 +123,7 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 
 		return
 	}
-	hashed, _ := auth.HashedPassword(p.Password)
+	hashed, _ := auth.HashPassword(p.Password)
 	user, err := cfg.objQuery.CreateUser(
 		r.Context(), database.CreateUserParams{
 			Email: p.Email, HashedPassword: hashed})
@@ -144,8 +147,9 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	type params struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email            string `json:"email"`
+		Password         string `json:"password"`
+		ExpiresInSeconds int    `json:"expires_in_seconds"`
 	}
 	var p params
 	decoder := json.NewDecoder(r.Body)
@@ -161,12 +165,23 @@ func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	is_valid, err := auth.CheckPasswordHash(p.Password, user.HashedPassword)
+
 	if is_valid && err == nil {
+		var token string
+		if p.ExpiresInSeconds == 0 || p.ExpiresInSeconds > 3600 {
+			token, _ = auth.MakeJWT(user.ID, cfg.keyJWT, 60*time.Second)
+			// fmt.Println(token)
+		} else {
+			token, _ = auth.MakeJWT(user.ID, cfg.keyJWT, time.Duration(p.ExpiresInSeconds)*time.Second)
+
+		}
+		// fmt.Println(token)
 		dat, err := json.Marshal(User{
 			ID:        user.ID,
 			CreatedAt: user.CreatedAt,
 			UpdatedAt: user.UpdatedAt,
 			Email:     user.Email,
+			Token:     token,
 		})
 		if err != nil {
 			w.WriteHeader(500)
@@ -205,6 +220,18 @@ func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(500)
 		return
 	}
+	tokenAuth, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(401)
+		w.Write([]byte(err.Error()))
+		return
+	}
+	id, err := auth.ValidateJWT(tokenAuth, cfg.keyJWT)
+	if err != nil {
+		w.WriteHeader(401)
+		w.Write([]byte("401 unauthorized"))
+		return
+	}
 	if len(p.Body) > 140 {
 		// respBody.Err = "Chirp is too long"
 		// respBody.Valid = false
@@ -215,14 +242,14 @@ func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// respBody.Err = ""
 		// respBody.Valid = true
-		// respBody.CleanedBody = clean_body(p.Body)
+		p.Body = clean_body(p.Body)
 		w.WriteHeader(201)
 	}
 	// parsedUserID, err := uuid.Parse(reqBody.UserID)
 
 	chirpParams := database.CreateChirpParams{
 		Body:   p.Body,
-		UserID: p.UserID,
+		UserID: id,
 	}
 
 	user, err := cfg.objQuery.CreateChirp(r.Context(), chirpParams)
@@ -300,10 +327,11 @@ func main() {
 	godotenv.Load(".env")
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
+	key := os.Getenv("JWTs_KEY")
 	db, _ := sql.Open("postgres", dbURL)
 	dbQueries := database.New(db)
 
-	apicfg := &apiConfig{objQuery: dbQueries, Platform: platform}
+	apicfg := &apiConfig{objQuery: dbQueries, Platform: platform, keyJWT: key}
 
 	serveMux := http.NewServeMux()
 	serveMux.Handle("/app/", apicfg.middlewareMetricsInc(
