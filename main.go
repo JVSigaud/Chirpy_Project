@@ -3,9 +3,11 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -26,6 +28,8 @@ type User struct {
 	Email          string    `json:"email"`
 	HashedPassword string    `json:"hashed_password"`
 	Token          string    `json:"token"`
+	RefreshToken   string    `json:"refresh_token"`
+	IsChirpyRed    bool      `json:"is_chirpy_red"`
 }
 
 type Chirpy struct {
@@ -76,6 +80,7 @@ type apiConfig struct {
 	objQuery       *database.Queries
 	Platform       string
 	keyJWT         string
+	polkaKey       string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -133,9 +138,11 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var usr User = User{ID: user.ID,
-		CreatedAt: user.CreatedAt,
-		UpdatedAt: user.UpdatedAt,
-		Email:     user.Email}
+		CreatedAt:   user.CreatedAt,
+		UpdatedAt:   user.UpdatedAt,
+		Email:       user.Email,
+		IsChirpyRed: user.IsChirpyRed,
+	}
 
 	data, _ := json.Marshal(usr)
 
@@ -147,9 +154,8 @@ func (cfg *apiConfig) CreateUser(w http.ResponseWriter, r *http.Request) {
 func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	type params struct {
-		Email            string `json:"email"`
-		Password         string `json:"password"`
-		ExpiresInSeconds int    `json:"expires_in_seconds"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 	var p params
 	decoder := json.NewDecoder(r.Body)
@@ -168,20 +174,29 @@ func (cfg *apiConfig) handlerUserLogin(w http.ResponseWriter, r *http.Request) {
 
 	if is_valid && err == nil {
 		var token string
-		if p.ExpiresInSeconds == 0 || p.ExpiresInSeconds > 3600 {
-			token, _ = auth.MakeJWT(user.ID, cfg.keyJWT, 60*time.Second)
-			// fmt.Println(token)
-		} else {
-			token, _ = auth.MakeJWT(user.ID, cfg.keyJWT, time.Duration(p.ExpiresInSeconds)*time.Second)
 
+		token, _ = auth.MakeJWT(user.ID, cfg.keyJWT, time.Duration(60)*time.Minute)
+		refreshToken, err := auth.MakeRefreshToken()
+		if err != nil {
+			w.WriteHeader(500)
+			w.Write([]byte(err.Error()))
+			return
+		}
+		err = cfg.objQuery.CreateRefreshToken(r.Context(), database.CreateRefreshTokenParams{Token: refreshToken, UserID: user.ID})
+		if err != nil {
+			w.WriteHeader(500)
+			w.Write([]byte(err.Error()))
+			return
 		}
 		// fmt.Println(token)
 		dat, err := json.Marshal(User{
-			ID:        user.ID,
-			CreatedAt: user.CreatedAt,
-			UpdatedAt: user.UpdatedAt,
-			Email:     user.Email,
-			Token:     token,
+			ID:           user.ID,
+			CreatedAt:    user.CreatedAt,
+			UpdatedAt:    user.UpdatedAt,
+			Email:        user.Email,
+			IsChirpyRed:  user.IsChirpyRed,
+			Token:        token,
+			RefreshToken: refreshToken,
 		})
 		if err != nil {
 			w.WriteHeader(500)
@@ -279,14 +294,134 @@ func (cfg *apiConfig) handlerChirps(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 
 }
+func (cfg *apiConfig) handlerRefresh(w http.ResponseWriter, r *http.Request) {
+	type response struct {
+		Token string `json:"token"`
+	}
+
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Couldn't find token", err)
+		return
+	}
+
+	user, err := cfg.objQuery.LookUpToken(r.Context(), refreshToken)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Couldn't get user for refresh token", err)
+		return
+	}
+
+	accessToken, err := auth.MakeJWT(
+		user.ID,
+		cfg.keyJWT,
+		time.Hour,
+	)
+	if err != nil {
+		respondWithError(w, http.StatusUnauthorized, "Couldn't validate token", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, response{
+		Token: accessToken,
+	})
+}
+func (cfg *apiConfig) handlerPostUsers(w http.ResponseWriter, r *http.Request) {
+	type req struct {
+		Password string `json:"password"`
+		Email    string `json:"email"`
+	}
+
+	var p req
+	decoder := json.NewDecoder(r.Body)
+	decoder.Decode(&p)
+
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "Not able to get token", err)
+		return
+	}
+	// user, err := cfg.objQuery.LookUpToken(r.Context(), token)
+	userID, err := auth.ValidateJWT(token, cfg.keyJWT)
+	if err != nil {
+		respondWithError(w, 401, "token malformed", err)
+		return
+	}
+
+	hashPassword, err := auth.HashPassword(p.Password)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "could not create a new password", err)
+		return
+	}
+	// user.HashedPassword = hashPassword
+	// user.Email = p.Email
+	update, err := cfg.objQuery.UpdateUser(
+		r.Context(),
+		database.UpdateUserParams{ID: userID,
+			Email:          p.Email,
+			HashedPassword: hashPassword})
+	if err != nil {
+		respondWithError(w, 401, "not able to update", err)
+		return
+	}
+	dat := User{
+		Email:       update.Email,
+		ID:          update.ID,
+		CreatedAt:   update.CreatedAt,
+		UpdatedAt:   update.UpdatedAt,
+		IsChirpyRed: update.IsChirpyRed,
+	}
+	respondWithJSON(w, http.StatusOK, dat)
+
+}
+
+func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter, r *http.Request) {
+	refreshToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Couldn't find token", err)
+		return
+	}
+
+	_, err = cfg.objQuery.RevokeRefreshToken(r.Context(), refreshToken)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Couldn't revoke session", err)
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// func (cfg *apiConfig) handlerRevoke(w http.ResponseWriter,r *http.Request){
+
+// }
+func (cfg *apiConfig) GetChirpsByUsers(r *http.Request) ([]database.Chirp, error) {
+	s := r.URL.Query().Get("author_id")
+	if s == "" {
+		user, err := cfg.objQuery.GetChirps(r.Context())
+		return user, err
+
+	} else {
+		uiid, _ := uuid.Parse(s)
+		user, err := cfg.objQuery.GetChirpsByUserId(r.Context(), uiid)
+		return user, err
+	}
+
+}
 
 func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	user, err := cfg.objQuery.GetChirps(r.Context())
+	w.Header().Set("Content-Type", "application/json")
+
+	user, err := cfg.GetChirpsByUsers(r)
 	if err != nil {
 		w.WriteHeader(500)
 		return
 	}
+
+	order := r.URL.Query().Get("sort")
+	fmt.Println(order)
+	if order == "desc" {
+		sort.Slice(user, func(i, j int) bool { return user[i].CreatedAt.After(user[j].CreatedAt) })
+	}
+
 	dataChirp := mapChirpy(user)
 	data, err := json.Marshal(dataChirp)
 	if err != nil {
@@ -299,6 +434,7 @@ func (cfg *apiConfig) handlerGetChirps(w http.ResponseWriter, r *http.Request) {
 }
 func (cfg *apiConfig) handlerGetChirp(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(r.PathValue("ID"))
+
 	if err != nil {
 		w.WriteHeader(500)
 		return
@@ -323,15 +459,95 @@ func (cfg *apiConfig) handlerGetChirp(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 	w.Write(dat)
 }
+
+func (cfg *apiConfig) handleDeleteChirp(w http.ResponseWriter, r *http.Request) {
+	token, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "Not able to get token", err)
+		return
+	}
+	// user, err := cfg.objQuery.LookUpToken(r.Context(), token)
+	userID, err := auth.ValidateJWT(token, cfg.keyJWT)
+	if err != nil {
+		respondWithError(w, 401, "token malformed", err)
+		return
+	}
+	id, err := uuid.Parse(r.PathValue("ID"))
+	if err != nil {
+		respondWithError(w, 401, "Can`t get Id", err)
+		return
+	}
+	user, err := cfg.objQuery.GetChirp(r.Context(), id)
+	if err != nil {
+		respondWithError(w, 404, "chirp not found", err)
+		return
+	}
+	if user.UserID != userID {
+		respondWithError(w, 403, "Not alowed", errors.New("unauthorized access"))
+		return
+	}
+
+	if cfg.objQuery.DeleteChirp(r.Context(), database.DeleteChirpParams{UserID: userID, ID: id}) != nil {
+		respondWithError(w, 403, "Not authorized", err)
+		return
+	}
+
+	respondWithJSON(w, 204, true)
+}
+
+func (cfg *apiConfig) handleWebHook(w http.ResponseWriter, r *http.Request) {
+	type dat struct {
+		UserId string `json:"user_id"`
+	}
+	type req struct {
+		Event string `json:"event"`
+		Data  dat    `json:"data"`
+	}
+	type empty struct{}
+	var emp empty
+	var p req
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&p)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "couldnt decode", err)
+		return
+	}
+
+	apiKey, err := auth.GetAPIKey(r.Header)
+	if err != nil {
+		respondWithError(w, 401, "cant get api key", err)
+		return
+	}
+
+	if !(apiKey == cfg.polkaKey) {
+		respondWithError(w, 401, "apikey not correct", errors.New("not the polka api key"))
+		return
+	}
+
+	if p.Event == "user.upgraded" {
+		uuid, _ := uuid.Parse(p.Data.UserId)
+		err := cfg.objQuery.UpgradeMember(r.Context(), uuid)
+		if err != nil {
+			respondWithError(w, 404, "Coudnt find user id", err)
+			return
+		}
+		respondWithJSON(w, 204, emp)
+
+	} else {
+		respondWithJSON(w, 204, emp)
+	}
+
+}
 func main() {
 	godotenv.Load(".env")
 	dbURL := os.Getenv("DB_URL")
 	platform := os.Getenv("PLATFORM")
 	key := os.Getenv("JWTs_KEY")
+	polkaKey := os.Getenv("POLKA_KEY")
 	db, _ := sql.Open("postgres", dbURL)
 	dbQueries := database.New(db)
 
-	apicfg := &apiConfig{objQuery: dbQueries, Platform: platform, keyJWT: key}
+	apicfg := &apiConfig{objQuery: dbQueries, Platform: platform, keyJWT: key, polkaKey: polkaKey}
 
 	serveMux := http.NewServeMux()
 	serveMux.Handle("/app/", apicfg.middlewareMetricsInc(
@@ -351,6 +567,14 @@ func main() {
 	serveMux.HandleFunc("POST /api/chirps", apicfg.handlerChirps)
 	serveMux.HandleFunc("GET /api/chirps", apicfg.handlerGetChirps)
 	serveMux.HandleFunc("GET /api/chirps/{ID}", apicfg.handlerGetChirp)
+	serveMux.HandleFunc("DELETE /api/chirps/{ID}", apicfg.handleDeleteChirp)
+
+	serveMux.HandleFunc("POST /api/refresh", apicfg.handlerRefresh)
+	serveMux.HandleFunc("POST /api/revoke", apicfg.handlerRevoke)
+	serveMux.HandleFunc("PUT /api/users", apicfg.handlerPostUsers)
+
+	serveMux.HandleFunc("POST /api/polka/webhooks", apicfg.handleWebHook)
+
 	var server = &http.Server{
 		Addr:    ":8080",
 		Handler: serveMux,

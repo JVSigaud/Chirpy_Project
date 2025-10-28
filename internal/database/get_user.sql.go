@@ -7,10 +7,12 @@ package database
 
 import (
 	"context"
+
+	"github.com/google/uuid"
 )
 
 const getUser = `-- name: GetUser :one
-SELECT id, created_at, updated_at, email, hashed_password FROM users
+SELECT id, created_at, updated_at, email, hashed_password, is_chirpy_red FROM users
 WHERE email = $1
 `
 
@@ -23,6 +25,18 @@ func (q *Queries) GetUser(ctx context.Context, email string) (User, error) {
 		&i.UpdatedAt,
 		&i.Email,
 		&i.HashedPassword,
+		&i.IsChirpyRed,
 	)
 	return i, err
+}
+
+const upgradeMember = `-- name: UpgradeMember :exec
+UPDATE users 
+SET is_chirpy_red = TRUE
+WHERE id = $1
+`
+
+func (q *Queries) UpgradeMember(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, upgradeMember, id)
+	return err
 }
